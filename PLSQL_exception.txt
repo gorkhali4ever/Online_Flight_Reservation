@@ -1,0 +1,162 @@
+/* This is an example to illustrate how to catch an error
+   in a PL/SQL block.  The PL/SQL block can be run directly
+   in SQL*Plus or put in PHP and run.
+
+   The example uses the following table, which stores a 
+   sequence of counter values. 
+*/  
+
+create table counter_table (
+  counter number(6) primary key
+);
+
+/* The following PL/SQL code first set the isolation level to
+   be serializable.  Then it decides what should be the next 
+   counter value.  Once it decides the next counter value, it
+   tries to insert the new value into the table.
+
+   Pay attention to the exception handling code.  To allow 
+   retry after an exception happens, loop statement and nested 
+   PL/SQL block are used.  See 
+     http://download-east.oracle.com/docs/cd/B10501_01/appdev.920/a96624/07_errs.htm#8858 
+   for more related examples.
+
+   In our example, since counter is a primary key, if another
+   transaction inserts a new record after the current transaction
+   starts, the current transaction is essentially trying to insert
+   a new record with a duplicate key.  Therefore, both "can't 
+   serialize access for this transaction" exception and "unique 
+   constraint violated" exception can occur.  
+
+   Oracle has a few predfined exception names.  See the following:
+     http://download-east.oracle.com/docs/cd/B10501_01/appdev.920/a96624/07_errs.htm#784
+
+   Among the predfined exception names, DUP_VAL_ON_INDEX is
+   the exception for duplicate key values ("unique constraint 
+   violated").  Unfortunately, there is no predefined exception 
+   for the "can't serialize access for this transaction" 
+   exception.  That is why you can see two WHEN statements in the 
+   code.  When both exceptions may happen, "unique constraint 
+   violated" (DUP_VAL_ON_INDEX) will be raised. 
+
+   Note that the following code will keep retrying until success.
+   It requires no human intervention.  The idea can be used to implement 
+   the student id in the project.     
+*/
+
+declare
+  err_num NUMBER; -- store Oracle error number
+
+  row_counter number; -- store the row count in table counter_table
+  current_counter number(6); -- store the maximum counter value
+begin
+  loop
+    set transaction isolation level serializable;
+    select count(*) into row_counter
+      from counter_table;
+    if row_counter > 0 then
+      select max(counter) into current_counter
+        from counter_table;
+      current_counter := current_counter + 1;
+    else
+      -- No value yet.  Start from 1.
+      current_counter := 1;
+    end if;
+
+    begin
+      insert into counter_table values (current_counter);
+      -- If we reach here, we have got a new valid counter value 
+      commit;
+      exit; -- exit the loop
+    exception
+      when DUP_VAL_ON_INDEX then
+        -- Another transaction has modified the table.  Rollback.
+        rollback;
+      when others then
+        -- Use SQLCODE, a buit-in procedure, to get the error code
+        err_num := SQLCODE; 
+        if err_num = -8177 then  
+          -- -8177 is the Oracle Error code for 
+          -- "can't serialize access for this transaction"
+          rollback;
+        else
+          -- Some other unrelated exception occurs.  
+          -- Do not handle it.  Raise it to the higher levels.
+          -- The PL/SQL block will rollback.
+          raise;
+        end if;
+    end;
+  end loop;
+end;
+/
+
+
+/* As mentioned in the previous comments, in our example, counter
+   is a primary key.  If another transaction inserts a new record 
+   after the current transaction starts, the current transaction 
+   is essentially trying to insert a new record with a duplicate 
+   key.  To simplify the implementation, we can also use the 
+   following code for this example and the project.  
+
+   Note that in the following example, we do not need to set 
+   serializable isolation level. 
+
+   So both the previous code segment and the following one can be 
+   used in the project.  However, the second example is only 
+   suitable for the situation like in this exmaple and the project 
+   student id.  The first example is more GENERAL.
+*/ 
+
+declare
+  row_counter number;
+  current_counter number(6);
+begin
+  select count(*) into row_counter
+    from counter_table;
+  if row_counter > 0 then
+    select max(counter) into current_counter
+      from counter_table;
+    current_counter := current_counter + 1;
+  else
+    current_counter := 1;
+  end if;
+
+  loop
+    begin
+      insert into counter_table values (current_counter);
+      -- If we reach here, we have got a new valid counter value 
+      commit;
+      exit;
+    exception
+      when DUP_VAL_ON_INDEX then
+        -- Simply increase the counter by 1 and try again.
+        current_counter := current_counter + 1;
+    end;
+  end loop;
+end;
+/
+
+/* I have mentioned that above code segments can be put
+   into PHP code and run directly.  But you can also use the
+   idea and PHP OCI functions to achieve similar effect.  The
+   reason is that when we use oci_execute(), we will know by 
+   its return value whether it is successful or not.  If it
+   returns false, We can use oci_error() to fetch the Oracle 
+   error code.  See:
+
+   http://www.php.net/manual/en/function.oci-error.php
+
+   For example:
+   $r = oci_execute($cursor);
+   if (!$r) {
+     $e = oci_error($cursor); 
+     echo $e['code']; // get the code here
+     echo $e['message'];
+   } 
+
+   Once you can get the Oracle error code, you can decide what
+   to do in PHP.  
+
+   There are different ways to do the same thing.  You can choose 
+   one based on your need.
+*/
